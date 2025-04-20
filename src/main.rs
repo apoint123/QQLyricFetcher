@@ -8,6 +8,7 @@ use thiserror::Error;
 mod decrypto;
 mod api;
 mod utils;
+mod ass_converter;
 
 use api::{search_song, get_song, Song};
 
@@ -167,9 +168,14 @@ async fn process_song_selection(client: &Client, songs: &[Song]) -> Result<bool>
 async fn process_lyric_format_choice(client: &Client, song: &Song) -> Result<bool> {
     let base_filename = utils::create_safe_filename(song);
     loop {
-        print_menu("\n选择歌词格式:", &["1. LRC (逐行)", "2. QRC (逐字)", "q. 返回"]);
+        print_menu("\n选择歌词格式:", &[
+            "1. LRC (逐行)", 
+            "2. QRC (逐字)", 
+            "3. ASS 字幕 (从 QRC 转换)",
+            "q. 返回"
+        ]);
         
-        match prompt_and_get_input("请输入选择 (1/2/q):")?.trim() {
+        match prompt_and_get_input("请输入选择 (1/2/3/q):")?.trim() {
             "1" => {
                 log_info!("正在获取 LRC 歌词...");
                 match api::get_lyric(client, &song.mid).await {
@@ -188,6 +194,30 @@ async fn process_lyric_format_choice(client: &Client, song: &Song) -> Result<boo
                         let trans_opt = if lyrics.trans.is_empty() { None } else { Some(lyrics.trans.as_str()) };
                         save_lyrics(&base_filename, "qrc", &lyrics.lyrics, trans_opt)?;
                         return Ok(true);
+                    },
+                    Ok(None) => log_warn!("未找到 '{}' 的 QRC 歌词。", song.name),
+                    Err(e) => log_error!("获取 QRC 歌词失败: {}", e),
+                }
+            },
+            "3" => {
+                log_info!("正在获取 QRC 歌词并转换为 ASS 字幕...");
+                match api::get_lyrics_by_id(client, &song.id.to_string()).await {
+                    Ok(Some(lyrics)) => {
+                        let qrc_filename = format!("{}.qrc", base_filename);
+                        let ass_filename = format!("{}.ass", base_filename);
+                        
+                        fs::write(&qrc_filename, &lyrics.lyrics)?;
+                        
+                        let qrc_path = PathBuf::from(&qrc_filename);
+                        let ass_path = PathBuf::from(&ass_filename);
+                        
+                        match ass_converter::convert_qrc_to_ass(&qrc_path, &ass_path) {
+                            Ok(_) => {
+                                log_success!("ASS 字幕已保存至: {}", ass_path.display());
+                                return Ok(true);
+                            },
+                            Err(e) => log_error!("转换 QRC 到 ASS 失败: {}", e),
+                        }
                     },
                     Ok(None) => log_warn!("未找到 '{}' 的 QRC 歌词。", song.name),
                     Err(e) => log_error!("获取 QRC 歌词失败: {}", e),
