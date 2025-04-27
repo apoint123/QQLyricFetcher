@@ -4,3 +4,4 @@
 
 #### 使用了以下项目的代码：
 - https://github.com/jitwxs/163MusicLyrics
+- https://github.com/WXRIW/Lyricify-Lyrics-Helper
