@@ -96,21 +96,22 @@ fn prompt_and_get_input(prompt_text: &str) -> Result<String> {
 
 async fn handle_search_mode(client: &Client) -> Result<()> {
     loop {
-        let keyword = prompt_and_get_input("请输入歌曲名称 (输入 'q' 返回上一级):")?;
-        let keyword = keyword.trim();
-        
-        if keyword == "q" {
-            break;
-        }
+        let keyword = prompt_and_get_input("请输入歌曲名称 (输入 'q' 返回上一级):")?.trim().to_string();
+        if keyword == "q" { break; }
         if keyword.is_empty() {
             log_warn!("搜索关键词不能为空。");
             continue;
         }
-
         log_info!("正在搜索: {}", keyword);
-        match search_song(client, keyword).await {
-            Ok(songs) if songs.is_empty() => log_error!("未找到与 '{}'相关的歌曲。", keyword),
-            Ok(songs) => if process_song_selection(client, &songs).await? { break },
+        match search_song(client, &keyword).await {
+            Ok((songs, raw_response)) if songs.is_empty() => {
+                log_error!("未找到与 '{}'相关的歌曲。", keyword);
+                println!("\n服务器返回的完整内容:");
+                println!("-----------------------");
+                println!("{}", raw_response);
+                println!("-----------------------");
+            },
+            Ok((songs, _)) => if process_song_selection(client, &songs).await? { break },
             Err(e) => log_error!("搜索歌曲时出错: {}", e),
         }
     }
@@ -119,22 +120,25 @@ async fn handle_search_mode(client: &Client) -> Result<()> {
 
 async fn handle_id_mode(client: &Client) -> Result<()> {
     loop {
-        let input_id = prompt_and_get_input("请输入歌曲 ID 或 MID (输入 'q' 返回上一级):")?;
-        let input_id = input_id.trim();
-        
-        if input_id == "q" { break; }
-        if input_id.is_empty() {
+        let id = prompt_and_get_input("请输入歌曲 ID 或 MID (输入 'q' 返回上一级):")?.trim().to_string();
+        if id == "q" { break; }
+        if id.is_empty() {
             log_warn!("ID/MID 不能为空。");
             continue;
         }
-
-        log_info!("正在获取歌曲信息: {}", input_id);
-        match get_song(client, input_id).await {
-            Ok(Some(song)) => {
+        log_info!("正在获取歌曲信息: {}", id);
+        match get_song(client, &id).await {
+            Ok((Some(song), _)) => {
                 print_song_info(&song);
                 if process_lyric_format_choice(client, &song).await? { break }
             },
-            Ok(None) => log_warn!("未找到 ID/MID 为 '{}' 的歌曲信息。", input_id),
+            Ok((None, json_str)) => {
+                log_warn!("未找到 ID/MID 为 '{}' 的歌曲信息。", id);
+                println!("\n服务器返回的完整内容:");
+                println!("-----------------------");
+                println!("{}", json_str);
+                println!("-----------------------");
+            },
             Err(e) => log_error!("获取歌曲信息时出错: {}", e),
         }
     }
@@ -174,42 +178,34 @@ async fn process_lyric_format_choice(client: &Client, song: &Song) -> Result<boo
             "3. ASS 字幕 (从 QRC 转换)",
             "q. 返回"
         ]);
-        
         match prompt_and_get_input("请输入选择 (1/2/3/q):")?.trim() {
             "1" => {
                 log_info!("正在获取 LRC 歌词...");
                 match api::get_lyric(client, &song.mid).await {
-                    Ok(Some(lyrics)) => {
-                        save_lyrics(&base_filename, "lrc", &lyrics.lyric, lyrics.trans.as_deref())?;
+                    Ok((Some(lyrics), _)) => {
+                        save_lyrics(&base_filename, "lrc", &lyrics.lyric, lyrics.trans.as_deref().filter(|t| !t.is_empty()), None)?;
                         return Ok(true);
                     },
-                    Ok(None) => log_warn!("未找到 '{}' 的 LRC 歌词。", song.name),
+                    Ok((None, raw_response)) => {
+                        log_warn!("未找到 '{}' 的 LRC 歌词。", song.name);
+                        println!("\n服务器返回的完整内容:");
+                        println!("-----------------------");
+                        println!("{}", raw_response);
+                        println!("-----------------------");
+                    },
                     Err(e) => log_error!("获取 LRC 歌词失败: {}", e),
                 }
             },
             "2" => {
                 log_info!("正在获取 QRC 歌词...");
                 match api::get_lyrics_by_id(client, &song.id.to_string()).await {
-                    Ok(Some(lyrics)) => {
+                    Ok((Some(lyrics), _)) => {
                         let trans_opt = if lyrics.trans.is_empty() { None } else { Some(lyrics.trans.as_str()) };
-                        save_lyrics(&base_filename, "qrc", &lyrics.lyrics, trans_opt)?;
-                        return Ok(true);
-                    },
-                    Ok(None) => log_warn!("未找到 '{}' 的 QRC 歌词。", song.name),
-                    Err(e) => log_error!("获取 QRC 歌词失败: {}", e),
-                }
-            },
-            "3" => {
-                log_info!("正在获取 QRC 歌词并转换为 ASS 字幕...");
-                match api::get_lyrics_by_id(client, &song.id.to_string()).await {
-                    Ok(Some(lyrics)) => {
-                        let qrc_filename = format!("{}.qrc", base_filename);
-                        let ass_filename = format!("{}.ass", base_filename);
+                        let roma_opt = if lyrics.roma.is_empty() { None } else { Some(lyrics.roma.as_str()) };
+                        save_lyrics(&base_filename, "qrc", &lyrics.lyrics, trans_opt, roma_opt)?;
                         
-                        fs::write(&qrc_filename, &lyrics.lyrics)?;
-                        
-                        let qrc_path = PathBuf::from(&qrc_filename);
-                        let ass_path = PathBuf::from(&ass_filename);
+                        let qrc_path = PathBuf::from(format!("{}.qrc", base_filename));
+                        let ass_path = PathBuf::from(format!("{}.ass", base_filename));
                         
                         match ass_converter::convert_qrc_to_ass(&qrc_path, &ass_path) {
                             Ok(_) => {
@@ -219,7 +215,42 @@ async fn process_lyric_format_choice(client: &Client, song: &Song) -> Result<boo
                             Err(e) => log_error!("转换 QRC 到 ASS 失败: {}", e),
                         }
                     },
-                    Ok(None) => log_warn!("未找到 '{}' 的 QRC 歌词。", song.name),
+                    Ok((None, raw_response)) => {
+                        log_warn!("未找到 '{}' 的 QRC 歌词。", song.name);
+                        println!("\n服务器返回的完整内容:");
+                        println!("-----------------------");
+                        println!("{}", raw_response);
+                        println!("-----------------------");
+                    },
+                    Err(e) => log_error!("获取 QRC 歌词失败: {}", e),
+                }
+            },
+            "3" => {
+                log_info!("正在获取 QRC 歌词并转换为 ASS 字幕...");
+                match api::get_lyrics_by_id(client, &song.id.to_string()).await {
+                    Ok((Some(lyrics), _)) => {
+                        let trans_opt = if lyrics.trans.is_empty() { None } else { Some(lyrics.trans.as_str()) };
+                        let roma_opt = if lyrics.roma.is_empty() { None } else { Some(lyrics.roma.as_str()) };
+                        save_lyrics(&base_filename, "qrc", &lyrics.lyrics, trans_opt, roma_opt)?;
+                        
+                        let qrc_path = PathBuf::from(format!("{}.qrc", base_filename));
+                        let ass_path = PathBuf::from(format!("{}.ass", base_filename));
+                        
+                        match ass_converter::convert_qrc_to_ass(&qrc_path, &ass_path) {
+                            Ok(_) => {
+                                log_success!("ASS 字幕已保存至: {}", ass_path.display());
+                                return Ok(true);
+                            },
+                            Err(e) => log_error!("转换 QRC 到 ASS 失败: {}", e),
+                        }
+                    },
+                    Ok((None, raw_response)) => {
+                        log_warn!("未找到 '{}' 的 QRC 歌词。", song.name);
+                        println!("\n服务器返回的完整内容:");
+                        println!("-----------------------");
+                        println!("{}", raw_response);
+                        println!("-----------------------");
+                    },
                     Err(e) => log_error!("获取 QRC 歌词失败: {}", e),
                 }
             },
@@ -229,7 +260,7 @@ async fn process_lyric_format_choice(client: &Client, song: &Song) -> Result<boo
     }
 }
 
-fn save_lyrics(base_filename: &str, ext: &str, lyric_content: &str, trans_content: Option<&str>) -> Result<()> {
+fn save_lyrics(base_filename: &str, ext: &str, lyric_content: &str, trans_content: Option<&str>, roma_content: Option<&str>) -> Result<()> {
     let filename = PathBuf::from(format!("{}.{}", base_filename, ext));
     fs::write(&filename, lyric_content)?;
     log_success!("{} 歌词已保存至: {}", ext.to_uppercase(), filename.display());
@@ -239,6 +270,13 @@ fn save_lyrics(base_filename: &str, ext: &str, lyric_content: &str, trans_conten
         fs::write(&trans_filename, trans)?;
         log_success!("翻译歌词已保存至: {}", trans_filename.display());
     }
+    
+    if let Some(roma) = roma_content.filter(|r| !r.is_empty()) {
+        let roma_filename = PathBuf::from(format!("{}_roma.qrc", base_filename));
+        fs::write(&roma_filename, roma)?;
+        log_success!("罗马音歌词已保存至: {}", roma_filename.display());
+    }
+    
     Ok(())
 }
 

@@ -55,7 +55,7 @@ struct SearchParam {
 }
 
 #[derive(Debug, Deserialize, Clone)]
-struct MusicFcgApiResult {
+pub struct MusicFcgApiResult {
     code: i32,
     req_1: SearchResponse,
 }
@@ -106,6 +106,7 @@ pub struct LyricResult {
 pub struct QqLyricsResponse {
     pub lyrics: String,
     pub trans: String,
+    pub roma: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -113,7 +114,7 @@ struct SongApiResponse {
     data: Vec<Song>,
 }
 
-pub async fn search_song(client: &Client, keyword: &str) -> Result<Vec<Song>> {
+pub async fn search_song(client: &Client, keyword: &str) -> Result<(Vec<Song>, String)> {
     let search_request = SearchRequest {
         req_1: SearchRequestBody {
             method: "DoSearchForQQMusicDesktop".to_string(),
@@ -127,19 +128,23 @@ pub async fn search_song(client: &Client, keyword: &str) -> Result<Vec<Song>> {
         },
     };
 
-    let resp = client
+    let resp_text = client
         .post(config::SEARCH_API_URL)
         .json(&search_request)
         .send()
         .await?
-        .json::<MusicFcgApiResult>()
+        .text()
         .await?;
+    
+    let raw_response = resp_text.clone();
+    
+    let resp: MusicFcgApiResult = serde_json::from_str(&resp_text)?;
 
-    Ok(if resp.code == 0 {
-        resp.req_1.data.body.song.list
+    if resp.code == 0 {
+        Ok((resp.req_1.data.body.song.list, raw_response))
     } else {
-        Vec::new()
-    })
+        Ok((Vec::new(), raw_response))
+    }
 }
 
 fn create_common_params(callback: &str) -> Vec<(&'static str, &str)> {
@@ -158,7 +163,7 @@ fn create_common_params(callback: &str) -> Vec<(&'static str, &str)> {
     ]
 }
 
-pub async fn get_lyric(client: &Client, song_mid: &str) -> Result<Option<LyricResult>> {
+pub async fn get_lyric(client: &Client, song_mid: &str) -> Result<(Option<LyricResult>, String)> {
     let current_millis = SystemTime::now()
         .duration_since(UNIX_EPOCH)?
         .as_millis();
@@ -180,15 +185,17 @@ pub async fn get_lyric(client: &Client, song_mid: &str) -> Result<Option<LyricRe
         .text()
         .await?;
 
+    let raw_response = resp_text.clone();
+    
     let json_str = crate::utils::resolve_resp_json(callback, &resp_text)?;
     if json_str.is_empty() {
-        return Ok(None);
+        return Ok((None, raw_response));
     }
 
     let mut result: LyricResult = serde_json::from_str(&json_str)?;
 
     if result.retcode != 0 {
-        return Ok(None);
+        return Ok((None, raw_response));
     }
     
     if !result.lyric.is_empty() {
@@ -204,10 +211,10 @@ pub async fn get_lyric(client: &Client, song_mid: &str) -> Result<Option<LyricRe
     let has_content = !result.lyric.is_empty() || 
         result.trans.as_ref().is_some_and(|t| !t.is_empty());
         
-    Ok(if has_content { Some(result) } else { None })
+    Ok((if has_content { Some(result) } else { None }, raw_response))
 }
 
-pub async fn get_lyrics_by_id(client: &Client, id: &str) -> Result<Option<QqLyricsResponse>> {
+pub async fn get_lyrics_by_id(client: &Client, id: &str) -> Result<(Option<QqLyricsResponse>, String)> {
     let params = [
         ("version", "15"),
         ("miniversion", "82"),
@@ -215,7 +222,7 @@ pub async fn get_lyrics_by_id(client: &Client, id: &str) -> Result<Option<QqLyri
         ("musicid", id),
     ];
 
-    let resp = client
+    let resp_text = client
         .get(config::QRC_API_URL)
         .query(&params)
         .send()
@@ -223,11 +230,14 @@ pub async fn get_lyrics_by_id(client: &Client, id: &str) -> Result<Option<QqLyri
         .text()
         .await?;
 
-    let resp = resp.replace("<!--", "").replace("-->", "");
+    let raw_response = resp_text.clone();
     
+    let resp = resp_text.replace("<!--", "").replace("-->", "");
+
     let mut result = QqLyricsResponse {
         lyrics: String::new(),
         trans: String::new(),
+        roma: String::new(),
     };
 
     let mut reader = Reader::from_str(&resp);
@@ -238,7 +248,7 @@ pub async fn get_lyrics_by_id(client: &Client, id: &str) -> Result<Option<QqLyri
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(e)) => {
                 if let Ok(name) = std::str::from_utf8(e.name().as_ref()) {
-                    if name == "content" || name == "contentts" {
+                    if name == "content" || name == "contentts" || name == "contentroma" {
                         current_element = name.to_string();
                     }
                 }
@@ -250,6 +260,7 @@ pub async fn get_lyrics_by_id(client: &Client, id: &str) -> Result<Option<QqLyri
                             match current_element.as_str() {
                                 "content" => result.lyrics = decrypted,
                                 "contentts" => result.trans = decrypted,
+                                "contentroma" => result.roma = decrypted,
                                 _ => {}
                             }
                         }
@@ -258,7 +269,7 @@ pub async fn get_lyrics_by_id(client: &Client, id: &str) -> Result<Option<QqLyri
             },
             Ok(Event::End(e)) => {
                 if let Ok(name) = std::str::from_utf8(e.name().as_ref()) {
-                    if name == "content" || name == "contentts" {
+                    if name == "content" || name == "contentts" || name == "contentroma" {
                         current_element.clear();
                     }
                 }
@@ -270,14 +281,14 @@ pub async fn get_lyrics_by_id(client: &Client, id: &str) -> Result<Option<QqLyri
         buf.clear();
     }
 
-    if result.lyrics.is_empty() && result.trans.is_empty() {
-        Ok(None)
+    if result.lyrics.is_empty() && result.trans.is_empty() && result.roma.is_empty() {
+        Ok((None, raw_response))
     } else {
-        Ok(Some(result))
+        Ok((Some(result), raw_response))
     }
 }
 
-pub async fn get_song(client: &Client, id_or_mid: &str) -> Result<Option<Song>> {
+pub async fn get_song(client: &Client, id_or_mid: &str) -> Result<(Option<Song>, String)> {
     let callback = "getOneSongInfoCallback";
     let is_number = id_or_mid.chars().all(|c| c.is_ascii_digit());
 
@@ -306,9 +317,9 @@ pub async fn get_song(client: &Client, id_or_mid: &str) -> Result<Option<Song>> 
 
     let json_str = crate::utils::resolve_resp_json(callback, &resp_text)?;
     if json_str.is_empty() {
-        return Ok(None);
+        return Ok((None, json_str));
     }
 
     let response: SongApiResponse = serde_json::from_str(&json_str)?;
-    Ok(response.data.first().cloned())
+    Ok((response.data.first().cloned(), json_str))
 }
